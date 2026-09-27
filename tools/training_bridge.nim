@@ -14,6 +14,7 @@ var
   decisionId: int
   maxTicks: int
   controlledSeat: int
+  lastLearnerTalkTick: int
   actions: seq[JsonNode]
 
 proc seedOf(value: string): uint64 =
@@ -72,14 +73,25 @@ proc current(): JsonNode =
   var choices = newJArray()
   for action in actions:
     if legal(action): choices.add(action)
-  let view = %*{"config": config, "observation": observation}
+  let talkReadyIn = max(0, 24 - (game.tick - lastLearnerTalkTick))
+  let view = %*{"config": config, "observation": observation,
+    "talk_ready_in": talkReadyIn}
+  var inbox = newJArray()
+  for message in observation["chat"]:
+    inbox.add(%*{"from": message["from"], "text": message["text"],
+      "turn": message["tick"],
+      "to": (if message["channel"].getStr() == "broadcast": %"public"
+             else: %*[message["to"].getInt()])})
   %*{"kind": "decision", "game": "battle-royal", "decision_id": decisionId,
      "seat": 0, "engine_seat": controlledSeat, "turn": game.tick,
-     "semantic_view": view, "inbox": observation["chat"],
+     "semantic_view": view, "inbox": inbox,
      "messages": [
        {"role": "system", "content": "Survive Battle Royal. Choose one legal action for this tick."},
        {"role": "user", "content": $view}],
-     "speech_messages": [], "action_schema": {"enum": choices},
+     "speech_messages": (if talkReadyIn == 0: %*[
+       {"role": "system", "content": "Speak to the living Battle Royal players. Return at most 120 printable ASCII characters."},
+       {"role": "user", "content": $view}] else: newJArray()),
+     "action_schema": {"enum": choices},
      "typed_question": newJNull()}
 
 proc itemCode(name: string): int =
@@ -176,6 +188,7 @@ proc encoding(): JsonNode =
   %*{"decision_id": decisionId, "values": values, "actions": slots}
 
 proc terminal(): JsonNode =
+  doAssert game.phase == phEnded
   let score = game.episodeScore(game.computePlacements(), AgentId(controlledSeat))
   %*{"kind": "terminal", "scores": {"0": score},
      "utilities": {"0": float(score) / 12.5 - 1.0}}
@@ -193,12 +206,36 @@ proc reset(request: JsonNode): JsonNode =
   config = parseJson(playerConfigJson(game, controlledSeat))
   while game.phase == phCountdown: game.step()
   decisionId = 0
+  lastLearnerTalkTick = -24
   current()
+
+proc advanceOpponents() =
+  for seat in 0 .. 15:
+    if seat == controlledSeat: continue
+    if game.agents[seat].alive:
+      let observation = parseJson(observationJson(game, seat))
+      for message in contexts[seat].talkMessages(observation):
+        game.applyInputJson(AgentId(seat), message)
+      game.applyInputJson(AgentId(seat),
+        trainingAction(contexts[seat], observation))
+  game.step()
 
 proc handle(request: JsonNode): JsonNode =
   case request["kind"].getStr()
   of "reset": return reset(request)
   of "encode": return encoding()
+  of "say":
+    doAssert request["decision_id"].getInt() == decisionId
+    let public = request["to"].kind == JNull
+    let recipient = if public: -1 else: request["to"].getInt()
+    let channel = if public: tcBroadcast else: tcDm
+    let text = request["text"].getStr()
+    if game.submitTalk(AgentId(controlledSeat), channel, recipient, text) != tkAccepted:
+      raise newException(ValueError, "Battle Royal rejected speech")
+    lastLearnerTalkTick = game.tick
+    return %*{"kind": "spoken", "text": sanitizeTalk(text),
+      "to": (if public: %"public" else: %*[recipient]),
+      "observation": current()}
   of "teacher":
     var action = trainingAction(contexts[controlledSeat],
       parseJson(observationJson(game, controlledSeat)))
@@ -210,13 +247,11 @@ proc handle(request: JsonNode): JsonNode =
     if action notin actions or not legal(action):
       return %*{"kind": "rejected", "reason": "Action is not legal"}
     game.applyInputJson(AgentId(controlledSeat), action)
-    for seat in 0 .. 15:
-      if seat == controlledSeat: continue
-      if game.agents[seat].alive:
-        game.applyInputJson(AgentId(seat),
-          trainingAction(contexts[seat], parseJson(observationJson(game, seat))))
-    game.step()
+    advanceOpponents()
     inc decisionId
+    if not game.agents[controlledSeat].alive:
+      while game.phase != phEnded:
+        advanceOpponents()
     return %*{"kind": "accepted", "action": action,
       "observation": (if game.phase == phEnded or not game.agents[controlledSeat].alive:
         terminal() else: current())}

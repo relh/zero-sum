@@ -163,7 +163,7 @@ proc weaponRank(id: string): int =
   of "net": 1
   else: 0
 
-proc maybeTalk(c: var Ctx, m: JsonNode, ws: WebSocket) =
+proc talkMessages*(c: var Ctx, m: JsonNode): seq[JsonNode] =
   ## Event-driven chatter. FFA diplomacy carries at any distance, so the
   ## bot negotiates instead of narrating: kills pay nothing and it says so
   ## to anyone who gets close. The sim rate-limits to 1 msg/s; we stay
@@ -177,8 +177,8 @@ proc maybeTalk(c: var Ctx, m: JsonNode, ws: WebSocket) =
   let hp = you["hp"].getInt()
 
   template say(channelArg: string, toArg: int, textArg: string) =
-    ws.send($(%*{"type": "talk", "channel": channelArg, "to": toArg,
-                 "text": textArg}), TextMessage)
+    result.add(%*{"type": "talk", "channel": channelArg, "to": toArg,
+                  "text": textArg})
     c.lastTalkTick = tick
     return
 
@@ -490,7 +490,8 @@ when isMainModule:
     of "observation":
       if ctx.staticMap.len > 0:
         try:
-          ctx.maybeTalk(m, ws)
+          for message in ctx.talkMessages(m):
+            ws.send($message, TextMessage)
           ws.send($decide(ctx, m), TextMessage)
         except CatchableError:
           break

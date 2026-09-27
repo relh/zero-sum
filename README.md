@@ -66,3 +66,32 @@ uv run coworld build --project . --version <version> \
 ```
 
 Status: Phase C (implementation) in progress.
+
+## Training
+
+Compile `tools/training_bridge.nim` with the pinned Nimby dependencies:
+
+```bash
+nim c -d:release --hints:off -o:/tmp/battle-royal-training-bridge tools/training_bridge.nim
+python3 tools/test_training_bridge.py /tmp/battle-royal-training-bridge
+```
+
+The persistent JSONL bridge controls one seeded seat against the ordinary survival
+policy. Numeric decisions contain 357 values, 29 action slots, and game-owned legal
+masks. Pass the compiled bridge to Metta's current `recipes.external.coworld` with
+`players=1`, `max_decisions=9120`, and a finite timestep budget. The default runs
+the full match; a single integer argument explicitly selects a shorter curriculum.
+Native PufferLib requires a reserved NVIDIA GPU.
+
+The semantic view preserves the native private observation and visible chat.
+Metta post-training can collect complete teacher episodes from the same bridge.
+Its independent `say` request supports broadcast or direct-message speech through
+the game's validator, without consuming the pending action decision. Speech is
+rate-limited to one message per 24 ticks and sanitized by the game's normal rules.
+Opponent actions and messages come from the same policy used by ordinary players.
+The simulation reaches match end before emitting terminal scores, even when the
+learner dies earlier.
+
+The numeric curriculum uses the bundled stat allocation and has no generated speech.
+Historical Metta RL optimizer proof is recorded in PR #26; its retired recipe is not
+a current entry point. Training does not authorize an upload or the pending rename.
