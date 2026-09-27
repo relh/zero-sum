@@ -51,6 +51,7 @@ jobs:
         run: |
           nim c --hints:off -d:release -o:training_bridge tools/training_bridge.nim
           python3 tools/test_training_bridge.py ./training_bridge
+          nim c --hints:off -d:release -o:numeric_player player/numeric.nim
 
   # Double-run determinism on one runner: the same seed twice must
   # produce byte-identical hash files.

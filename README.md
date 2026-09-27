@@ -93,5 +93,21 @@ The simulation reaches match end before emitting terminal scores, even when the
 learner dies earlier.
 
 The numeric curriculum uses the bundled stat allocation and has no generated speech.
+Its codec in `player/numeric_codec.nim` also reads the ordinary private player view.
+`player/numeric.nim` sends that encoding to a frozen Metta policy service and sends
+the selected action through the normal player socket. The player owns inference;
+the game retains validation, scoring, results, and replay.
+
+```bash
+nim c -d:release --hints:off -o:/tmp/battle-royal-numeric-player player/numeric.nim
+metta-choice-serve /path/to/exported-policy --port 18888
+COWORLD_PLAYER_WS_URL='ws://localhost:8080/player?slot=0&token=seat-token' \
+  PLAYER_NUMERIC_URL=http://localhost:18888/actions /tmp/battle-royal-numeric-player
+```
+
+One service process owns one episode and seat. Restart it between episodes.
+The player uses the bundled stat allocation and ordinary scripted speech.
+Numeric weights select actions; generated speech remains a separate policy path.
+
 Historical Metta RL optimizer proof is recorded in PR #26; its retired recipe is not
 a current entry point. Training does not authorize an upload or the pending rename.

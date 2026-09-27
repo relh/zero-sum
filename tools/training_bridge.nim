@@ -2,10 +2,8 @@
 ## The observation and actions use the same game-owned player protocol as /player.
 
 import std/[json, os, strutils]
-import battle_royal/[arena, obs, sim, types]
-import ../player/baseline
-
-const Directions = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+import battle_royal/[obs, sim, types]
+import ../player/[baseline, numeric_codec]
 
 var
   game: Sim
@@ -23,56 +21,15 @@ proc seedOf(value: string): uint64 =
     result = (result xor uint64(ord(ch))) * 1099511628211'u64
   result = result and 0x7fffffffffffffff'u64
 
-proc makeActions(): seq[JsonNode] =
-  result.add(%*{"type": "action", "do": "none"})
-  for name in Directions:
-    result.add(%*{"type": "action", "do": "move", "dir": name})
-  for name in Directions:
-    result.add(%*{"type": "action", "do": "attack", "dir": name})
-  result.add(%*{"type": "action", "do": "pickup"})
-  for slot in [SlotHand, SlotBody, 0, 1, 2, 3]:
-    result.add(%*{"type": "action", "do": "drop", "slot": slot})
-  for slot in 0 .. 3:
-    result.add(%*{"type": "action", "do": "use", "slot": slot})
-  result.add(%*{"type": "action", "do": "interact"})
-
 proc legal(action: JsonNode): bool =
-  if action["do"].getStr() == "none": return true
-  if game.phase != phLive or not game.agents[controlledSeat].alive: return false
-  let me = game.agents[controlledSeat]
-  case action["do"].getStr()
-  of "move":
-    if me.moveReadyTick > game.tick: return false
-    for i, name in Directions:
-      if name == action["dir"].getStr():
-        let delta = [Pos(x: 0, y: -1), Pos(x: 1, y: -1),
-                     Pos(x: 1, y: 0), Pos(x: 1, y: 1),
-                     Pos(x: 0, y: 1), Pos(x: -1, y: 1),
-                     Pos(x: -1, y: 0), Pos(x: -1, y: -1)][i]
-        return not blocksMovement(game.arena.tile(Pos(
-          x: me.pos.x + delta.x, y: me.pos.y + delta.y)))
-  of "attack": return me.attackReadyTick <= game.tick
-  of "pickup":
-    for ground in game.ground:
-      if ground.pos == me.pos: return true
-  of "drop":
-    let slot = action["slot"].getInt()
-    if slot == SlotHand: return me.hand != iNone
-    if slot == SlotBody: return me.body != iNone
-    return slot < me.packSlots and me.pack[slot].item != iNone
-  of "use":
-    let slot = action["slot"].getInt()
-    return slot < me.packSlots and me.pack[slot].item != iNone
-  of "interact":
-    for bush in game.bushes:
-      if bush.pos == me.pos and bush.charges > 0: return true
-  else: raise newException(ValueError, "Unknown Battle Royal action")
+  numeric_codec.legal(config,
+    parseJson(observationJson(game, controlledSeat)), action)
 
 proc current(): JsonNode =
   let observation = parseJson(observationJson(game, controlledSeat))
   var choices = newJArray()
   for action in actions:
-    if legal(action): choices.add(action)
+    if numeric_codec.legal(config, observation, action): choices.add(action)
   let talkReadyIn = max(0, 24 - (game.tick - lastLearnerTalkTick))
   let view = %*{"config": config, "observation": observation,
     "talk_ready_in": talkReadyIn}
@@ -94,98 +51,9 @@ proc current(): JsonNode =
      "action_schema": {"enum": choices},
      "typed_question": newJNull()}
 
-proc itemCode(name: string): int =
-  for item in ItemId:
-    if $item == name: return ord(item)
-  raise newException(ValueError, "Unknown Battle Royal item: " & name)
-
 proc encoding(): JsonNode =
-  let observation = parseJson(observationJson(game, controlledSeat))
-  let you = observation["you"]
-  let zone = observation["zone"]
-  var values = newJArray()
-  for number in [float(game.tick) / float(maxTicks),
-                 float(controlledSeat) / 15.0,
-                 float(you["pos"][0].getInt()) / 48.0,
-                 float(you["pos"][1].getInt()) / 48.0,
-                 float(you["hp"].getInt()) / 100.0,
-                 float(you["stats"]["speed"].getInt()) / 10.0,
-                 float(you["stats"]["strength"].getInt()) / 10.0,
-                 float(you["stats"]["intelligence"].getInt()) / 10.0,
-                 float(you["stats"]["athleticism"].getInt()) / 10.0,
-                 float(itemCode(you["hand"]["id"].getStr())) / float(ord(high(ItemId))),
-                 float(if you["body"].kind == JNull: 0 else:
-                   itemCode(you["body"].getStr())) / float(ord(high(ItemId))),
-                 float(zone["radius"].getInt()) / 48.0,
-                 float(zone["next_radius"].getInt()) / 48.0,
-                 float(zone["center"][0].getInt()) / 48.0,
-                 float(zone["center"][1].getInt()) / 48.0,
-                 float(max(0, zone["shrink_tick"].getInt() - game.tick)) / float(maxTicks),
-                 float(you["move_ready_in"].getInt()) / 100.0,
-                 float(you["attack_ready_in"].getInt()) / 100.0,
-                 float(you["kills"].getInt()) / 15.0,
-                 float(observation["chat"].len) / 16.0,
-                 float(observation["events"].len) / 16.0]:
-    values.add(%number)
-  for index in 0 .. 3:
-    if index < you["pack"].len and you["pack"][index].kind != JNull:
-      values.add(%(float(itemCode(you["pack"][index]["id"].getStr())) /
-        float(ord(high(ItemId)))))
-      values.add(%(float(you["pack"][index]["n"].getInt()) / 20.0))
-    else:
-      values.add(%0)
-      values.add(%0)
-  for slot in 0 .. 15:
-    if slot == controlledSeat: continue
-    var seen = newJNull()
-    for other in observation["visible"]["agents"]:
-      if other["slot"].getInt() == slot: seen = other
-    if seen.kind == JNull:
-      for unused in 0 .. 8: values.add(%0)
-    else:
-      values.add(%1)
-      values.add(%(float(seen["pos"][0].getInt()) / 48.0))
-      values.add(%(float(seen["pos"][1].getInt()) / 48.0))
-      values.add(%(case seen["hp_band"].getStr()
-        of "healthy": 1.0
-        of "hurt": 0.5
-        else: 0.0))
-      values.add(%(if seen["netted"].getBool(): 1 else: 0))
-      values.add(%(if seen["poisoned"].getBool(): 1 else: 0))
-      values.add(%(float(itemCode(seen["hand"].getStr())) /
-        float(ord(high(ItemId)))))
-      values.add(%(float(if seen["body"].kind == JNull: 0 else:
-        itemCode(seen["body"].getStr())) / float(ord(high(ItemId)))))
-      values.add(%(if seen["channeling"].getBool(): 1 else: 0))
-  for index in 0 .. 15:
-    if index < observation["visible"]["items"].len:
-      let item = observation["visible"]["items"][index]
-      values.add(%1)
-      values.add(%(float(item["pos"][0].getInt()) / 48.0))
-      values.add(%(float(item["pos"][1].getInt()) / 48.0))
-      values.add(%(float(itemCode(item["id"].getStr())) / float(ord(high(ItemId)))))
-      values.add(%(float(item["n"].getInt()) / 20.0))
-    else:
-      for unused in 0 .. 4: values.add(%0)
-  for index in 0 .. 7:
-    if index < observation["visible"]["bushes"].len:
-      let bush = observation["visible"]["bushes"][index]
-      values.add(%1)
-      values.add(%(float(bush["pos"][0].getInt()) / 48.0))
-      values.add(%(float(bush["pos"][1].getInt()) / 48.0))
-      values.add(%(float(bush["charges"].getInt()) / 10.0))
-    else:
-      for unused in 0 .. 3: values.add(%0)
-  for y in -4 .. 4:
-    for x in -4 .. 4:
-      let tile = game.arena.tile(Pos(
-        x: you["pos"][0].getInt() + x,
-        y: you["pos"][1].getInt() + y))
-      values.add(%(float(ord(tile)) / float(ord(high(TileKind)))))
-  var slots = newJArray()
-  for action in actions:
-    slots.add(if legal(action): action else: newJNull())
-  %*{"decision_id": decisionId, "values": values, "actions": slots}
+  numericEncoding(config, parseJson(observationJson(game, controlledSeat)),
+    decisionId)
 
 proc terminal(): JsonNode =
   doAssert game.phase == phEnded
